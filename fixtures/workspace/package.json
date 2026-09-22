@@ -1,0 +1,8 @@
+{
+  "name": "broken-add",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

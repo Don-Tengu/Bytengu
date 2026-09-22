@@ -1,0 +1,7 @@
+{
+  "name": "write_file",
+  "arguments": {
+    "path": "fixtures/out.txt",
+    "content": "written by tools-cli\n"
+  }
+}

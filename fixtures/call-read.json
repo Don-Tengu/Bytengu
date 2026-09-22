@@ -1,0 +1,6 @@
+{
+  "name": "read_file",
+  "arguments": {
+    "path": "fixtures/notes.txt"
+  }
+}

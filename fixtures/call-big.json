@@ -1,0 +1,6 @@
+{
+  "name": "bash",
+  "arguments": {
+    "command": "node -e \"process.stdout.write('x'.repeat(50000))\""
+  }
+}
