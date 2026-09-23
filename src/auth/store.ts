@@ -1,6 +1,11 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { FileSystem } from "@effect/platform";
+import { Data, Effect, Either } from "effect";
+
+export class AuthError extends Data.TaggedError("AuthError")<{
+  readonly message: string;
+}> {}
 
 export type StoredOAuth = {
   readonly type: "oauth";
@@ -41,7 +46,13 @@ const parseStored = (value: unknown): StoredAuth | undefined => {
 };
 
 export const parseAuthFile = (text: string): AuthFile => {
-  const json: unknown = JSON.parse(text);
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    throw new AuthError({ message: `auth file is not valid JSON: ${message}` });
+  }
   if (!isRecord(json)) return emptyAuth();
   const providers: Record<string, StoredAuth> = {};
   if (isRecord(json.providers)) {
@@ -54,21 +65,29 @@ export const parseAuthFile = (text: string): AuthFile => {
   return fallback ? { default: fallback, providers } : { providers };
 };
 
-const isEnoent = (cause: unknown): boolean =>
-  typeof cause === "object" && cause !== null && "code" in cause && cause.code === "ENOENT";
+const missingFile = (error: { readonly _tag: string; readonly reason?: string }): boolean =>
+  error._tag === "SystemError" && error.reason === "NotFound";
 
-export const readAuthFile = async (path: string): Promise<AuthFile> => {
-  try {
-    return parseAuthFile(await readFile(path, "utf8"));
-  } catch (cause) {
-    if (isEnoent(cause)) return emptyAuth();
-    throw cause;
-  }
-};
+export const readAuthFile = (path: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const text = yield* fs.readFileString(path).pipe(Effect.either);
+    if (Either.isLeft(text)) {
+      if (missingFile(text.left)) return emptyAuth();
+      return yield* Effect.fail(text.left);
+    }
+    return yield* Effect.try({
+      try: () => parseAuthFile(text.right),
+      catch: (cause) => (cause instanceof AuthError ? cause : new AuthError({ message: String(cause) })),
+    });
+  });
 
-export const writeAuthFile = async (path: string, file: AuthFile): Promise<void> => {
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await chmod(dirname(path), 0o700);
-  await writeFile(path, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-  await chmod(path, 0o600);
-};
+export const writeAuthFile = (path: string, file: AuthFile) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const directory = dirname(path);
+    yield* fs.makeDirectory(directory, { recursive: true });
+    yield* fs.chmod(directory, 0o700);
+    yield* fs.writeFileString(path, `${JSON.stringify(file, null, 2)}\n`);
+    yield* fs.chmod(path, 0o600);
+  });

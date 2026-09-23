@@ -62,17 +62,17 @@ type AppConfig = {
   readonly headers: Readonly<Record<string, string>>;
 };
 
-const loadConfig = Effect.tryPromise({
-  try: () => sessionConfig(),
-  catch: (cause) => new LLMError({ message: cause instanceof Error ? cause.message : String(cause) }),
-}).pipe(
-  Effect.map((session) => ({
+const loadConfig = Effect.gen(function* () {
+  const session = yield* sessionConfig().pipe(
+    Effect.mapError((error) => new LLMError({ message: error.message })),
+  );
+  return {
     baseUrl: session.baseUrl,
     model: session.model,
     apiKey: Redacted.make(session.apiKey),
     headers: session.headers,
-  })),
-);
+  };
+});
 
 const preview = (text: string, max = 800): string => {
   const trimmed = text.trim();

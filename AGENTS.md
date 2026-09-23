@@ -1,8 +1,27 @@
 # Bytengu
 
-Bytengu is a local coding agent. One process, one tool loop, written with Effect. It borrows behavior from OpenCode (exact edit, paged read, device-code login) and does not copy OpenCode's server, AI SDK, plugin host, or database.
+Bytengu is a local coding agent. One process, one tool loop. Runtime code is Effect. It borrows behavior from OpenCode (exact edit, paged read, device-code login) and does not copy OpenCode's server, AI SDK, plugin host, or database.
 
 Until a TUI exists, every chat request uses xAI and the model `grok-4.7`. Do not add a provider picker, a model flag, or a thinking-level setting. The place those will plug in is `src/provider/registry.ts`.
+
+## Effect
+
+This is the project rule. Write runtime code as `Effect`, including login, auth files, token refresh, HTTP, and tools. Compose with `Effect.gen`. Failures are `Data.TaggedError` (or `PlatformError` from `FileSystem`). Delays are `Effect.sleep`. File IO goes through `FileSystem.FileSystem`.
+
+Do not write a finished `async` function and wrap it in `Effect.tryPromise` at the chat loop. The function itself is the Effect. Tests run it with `Effect.runPromise` and `Effect.provide(NodeFileSystem.layer)`.
+
+Stay on Effect 3 (`Effect<A, E, R>`). Do not add `Layer` or `Context.Service`. The chat loop stays a plain `Effect.gen`. A provider is a plain object whose operations return `Effect`. A tool dispatch is a `switch`.
+
+## Dispatch
+
+Do not ask the user to open `/agents`. A one-line question stays in this session. A change, a test run, or a review of this repo launches the `bytengu` workflow. Pass `task` as what they asked, and `kind`:
+
+- `implement` — explore, then implement, then test, then review. This is the default.
+- `explore` — find the files only.
+- `test` — tests only.
+- `review` — read the diff only.
+
+The user can also run `/bytengu`.
 
 ## Commands
 
@@ -28,6 +47,7 @@ test/chat/             loop helpers; sessions land here later
 test/proxy/
 test/tools/            one file per tool, shared setup in harness.ts
 test/provider/         one file per provider
+.grok/agents/          bytengu-explore, implement, test, review
 ```
 
 Imports use the `.ts` suffix. `verbatimModuleSyntax` is on.
@@ -63,10 +83,6 @@ Bearer resolution, in order: oauth record in the auth file, then a stored api re
 `.env` values `BASE_URL`, `API_KEY`, and `MODEL` are not read by the chat loop.
 
 The device-code client id is the public Grok CLI client. `referrer` is `bytengu`. Do not copy OpenCode's user-agent or `referrer=opencode`.
-
-## Effect
-
-Stay on Effect 3 (`Effect<A, E, R>`). New code may return `Effect`. Do not add `Layer`, `Context.Service`, or a tool registry service. A plain object and a `switch` are the extension points.
 
 ## Do not build yet
 

@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { defaultAuthPath, readAuthFile, writeAuthFile, type AuthFile, type StoredOAuth } from "../auth/store.ts";
+import { Deferred, Effect, FiberId } from "effect";
+import {
+  AuthError,
+  defaultAuthPath,
+  readAuthFile,
+  writeAuthFile,
+  type AuthFile,
+  type StoredOAuth,
+} from "../auth/store.ts";
 
 /** Public Grok CLI device-code client. xAI does not issue a Bytengu client id. */
 const CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
@@ -44,6 +52,12 @@ type DeviceTokenError = {
   readonly error_description?: string;
 };
 
+type Clock = {
+  readonly fetch?: FetchLike;
+  readonly sleep?: (ms: number) => Effect.Effect<void>;
+  readonly now?: () => number;
+};
+
 const authHeaders = (): Record<string, string> => ({
   "Content-Type": "application/x-www-form-urlencoded",
   Accept: "application/json",
@@ -54,8 +68,6 @@ const positiveSecondsToMs = (value: unknown, defaultMs: number): number => {
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : defaultMs;
 };
-
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const accessTokenIsExpiring = (
   expires: number,
@@ -80,48 +92,59 @@ export const jwtIsExpiring = (token: string, now: number, skewMs = ACCESS_TOKEN_
   }
 };
 
-const readJson = async (response: Response): Promise<unknown> => {
-  const text = await response.text();
-  if (!text) return {};
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return { error_description: text };
-  }
-};
-
-export const requestDeviceCode = async (fetchImpl: FetchLike = fetch): Promise<DeviceCode> => {
-  const response = await fetchImpl(DEVICE_AUTHORIZATION_URL, {
-    method: "POST",
-    headers: authHeaders(),
-    body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      scope: SCOPE,
-      referrer: "bytengu",
-    }).toString(),
+const readJson = (response: Response) =>
+  Effect.gen(function* () {
+    const text = yield* Effect.promise(() => response.text());
+    if (!text) return {};
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return { error_description: text };
+    }
   });
-  const json = (await readJson(response)) as Partial<DeviceCode> & {
-    device_code?: string;
-    user_code?: string;
-    verification_uri?: string;
-    verification_uri_complete?: string;
-    expires_in?: number;
-    interval?: number;
-    error_description?: string;
-  };
-  if (!response.ok || !json.device_code || !json.user_code || !json.verification_uri) {
-    const detail = json.error_description ?? "";
-    throw new Error(`xAI device code request failed (${response.status})${detail ? `: ${detail}` : ""}`);
-  }
-  return {
-    deviceCode: json.device_code,
-    userCode: json.user_code,
-    verificationUri: json.verification_uri,
-    ...(json.verification_uri_complete ? { verificationUriComplete: json.verification_uri_complete } : {}),
-    ...(json.expires_in !== undefined ? { expiresIn: json.expires_in } : {}),
-    ...(json.interval !== undefined ? { interval: json.interval } : {}),
-  };
-};
+
+const postForm = (url: string, body: URLSearchParams, fetchImpl: FetchLike) =>
+  Effect.tryPromise({
+    try: () =>
+      fetchImpl(url, {
+        method: "POST",
+        headers: authHeaders(),
+        body: body.toString(),
+      }),
+    catch: (cause) => new AuthError({ message: cause instanceof Error ? cause.message : String(cause) }),
+  });
+
+export const requestDeviceCode = (fetchImpl: FetchLike = fetch) =>
+  Effect.gen(function* () {
+    const response = yield* postForm(
+      DEVICE_AUTHORIZATION_URL,
+      new URLSearchParams({ client_id: CLIENT_ID, scope: SCOPE, referrer: "bytengu" }),
+      fetchImpl,
+    );
+    const json = (yield* readJson(response)) as Partial<DeviceCode> & {
+      device_code?: string;
+      user_code?: string;
+      verification_uri?: string;
+      verification_uri_complete?: string;
+      expires_in?: number;
+      interval?: number;
+      error_description?: string;
+    };
+    if (!response.ok || !json.device_code || !json.user_code || !json.verification_uri) {
+      const detail = json.error_description ?? "";
+      return yield* new AuthError({
+        message: `xAI device code request failed (${response.status})${detail ? `: ${detail}` : ""}`,
+      });
+    }
+    return {
+      deviceCode: json.device_code,
+      userCode: json.user_code,
+      verificationUri: json.verification_uri,
+      ...(json.verification_uri_complete ? { verificationUriComplete: json.verification_uri_complete } : {}),
+      ...(json.expires_in !== undefined ? { expiresIn: json.expires_in } : {}),
+      ...(json.interval !== undefined ? { interval: json.interval } : {}),
+    } satisfies DeviceCode;
+  });
 
 export const loginInstructions = (device: DeviceCode): string =>
   [
@@ -130,146 +153,165 @@ export const loginInstructions = (device: DeviceCode): string =>
     `短碼: ${device.userCode}`,
   ].join("\n");
 
-export const pollDeviceToken = async (
-  device: DeviceCode,
-  options: { fetch?: FetchLike; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
-): Promise<TokenSet> => {
-  const fetchImpl = options.fetch ?? fetch;
-  const wait = options.sleep ?? sleep;
-  const now = options.now ?? (() => Date.now());
-  const deadline = now() + positiveSecondsToMs(device.expiresIn, DEVICE_CODE_DEFAULT_EXPIRES_MS);
-  let intervalMs = Math.max(positiveSecondsToMs(device.interval, DEVICE_CODE_DEFAULT_INTERVAL_MS), DEVICE_CODE_MIN_INTERVAL_MS);
+export const pollDeviceToken = (device: DeviceCode, options: Clock = {}) =>
+  Effect.gen(function* () {
+    const fetchImpl = options.fetch ?? fetch;
+    const wait = options.sleep ?? ((ms: number) => Effect.sleep(ms));
+    const now = options.now ?? (() => Date.now());
+    const deadline = now() + positiveSecondsToMs(device.expiresIn, DEVICE_CODE_DEFAULT_EXPIRES_MS);
+    let intervalMs = Math.max(
+      positiveSecondsToMs(device.interval, DEVICE_CODE_DEFAULT_INTERVAL_MS),
+      DEVICE_CODE_MIN_INTERVAL_MS,
+    );
 
-  while (now() < deadline) {
-    const response = await fetchImpl(TOKEN_URL, {
-      method: "POST",
-      headers: authHeaders(),
-      body: new URLSearchParams({
-        grant_type: DEVICE_CODE_GRANT_TYPE,
+    while (now() < deadline) {
+      const response = yield* postForm(
+        TOKEN_URL,
+        new URLSearchParams({
+          grant_type: DEVICE_CODE_GRANT_TYPE,
+          client_id: CLIENT_ID,
+          device_code: device.deviceCode,
+        }),
+        fetchImpl,
+      );
+      const json = (yield* readJson(response)) as DeviceTokenError & {
+        access_token?: string;
+        refresh_token?: string;
+        expires_in?: number;
+      };
+      if (response.ok && json.access_token && json.refresh_token) {
+        return {
+          access: json.access_token,
+          refresh: json.refresh_token,
+          expires: now() + (json.expires_in ?? 3600) * 1000,
+        } satisfies TokenSet;
+      }
+      const remaining = Math.max(0, deadline - now());
+      if (json.error === "authorization_pending") {
+        yield* wait(Math.min(intervalMs + OAUTH_POLLING_SAFETY_MARGIN_MS, remaining));
+        continue;
+      }
+      if (json.error === "slow_down") {
+        intervalMs += DEVICE_CODE_SLOW_DOWN_INCREMENT_MS;
+        yield* wait(Math.min(intervalMs + OAUTH_POLLING_SAFETY_MARGIN_MS, remaining));
+        continue;
+      }
+      if (json.error === "access_denied" || json.error === "authorization_denied") {
+        return yield* new AuthError({ message: "xAI device authorization was denied" });
+      }
+      if (json.error === "expired_token") {
+        return yield* new AuthError({ message: "xAI device code expired - please re-run login" });
+      }
+      const detail = json.error_description ?? json.error ?? "";
+      return yield* new AuthError({
+        message: `xAI device token exchange failed (${response.status})${detail ? `: ${detail}` : ""}`,
+      });
+    }
+    return yield* new AuthError({ message: "xAI device authorization timed out" });
+  });
+
+export const refreshAccessToken = (refreshToken: string, fetchImpl: FetchLike = fetch) =>
+  Effect.gen(function* () {
+    const response = yield* postForm(
+      TOKEN_URL,
+      new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
         client_id: CLIENT_ID,
-        device_code: device.deviceCode,
-      }).toString(),
-    });
-    const json = (await readJson(response)) as DeviceTokenError & {
+      }),
+      fetchImpl,
+    );
+    const json = (yield* readJson(response)) as {
       access_token?: string;
       refresh_token?: string;
       expires_in?: number;
+      error_description?: string;
     };
-    if (response.ok && json.access_token && json.refresh_token) {
-      return {
-        access: json.access_token,
-        refresh: json.refresh_token,
-        expires: now() + (json.expires_in ?? 3600) * 1000,
-      };
+    if (!response.ok || !json.access_token) {
+      const detail = json.error_description ?? "";
+      return yield* new AuthError({
+        message: `xAI token refresh failed (${response.status})${detail ? `: ${detail}` : ""}`,
+      });
     }
-    const remaining = Math.max(0, deadline - now());
-    if (json.error === "authorization_pending") {
-      await wait(Math.min(intervalMs + OAUTH_POLLING_SAFETY_MARGIN_MS, remaining));
-      continue;
-    }
-    if (json.error === "slow_down") {
-      intervalMs += DEVICE_CODE_SLOW_DOWN_INCREMENT_MS;
-      await wait(Math.min(intervalMs + OAUTH_POLLING_SAFETY_MARGIN_MS, remaining));
-      continue;
-    }
-    if (json.error === "access_denied" || json.error === "authorization_denied") {
-      throw new Error("xAI device authorization was denied");
-    }
-    if (json.error === "expired_token") {
-      throw new Error("xAI device code expired - please re-run login");
-    }
-    const detail = json.error_description ?? json.error ?? "";
-    throw new Error(`xAI device token exchange failed (${response.status})${detail ? `: ${detail}` : ""}`);
-  }
-  throw new Error("xAI device authorization timed out");
-};
-
-export const refreshAccessToken = async (refreshToken: string, fetchImpl: FetchLike = fetch): Promise<TokenSet> => {
-  const response = await fetchImpl(TOKEN_URL, {
-    method: "POST",
-    headers: authHeaders(),
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-    }).toString(),
+    return {
+      access: json.access_token,
+      refresh: json.refresh_token || refreshToken,
+      expires: Date.now() + (json.expires_in ?? 3600) * 1000,
+    } satisfies TokenSet;
   });
-  const json = (await readJson(response)) as {
-    access_token?: string;
-    refresh_token?: string;
-    expires_in?: number;
-    error_description?: string;
-  };
-  if (!response.ok || !json.access_token) {
-    const detail = json.error_description ?? "";
-    throw new Error(`xAI token refresh failed (${response.status})${detail ? `: ${detail}` : ""}`);
-  }
-  return {
-    access: json.access_token,
-    refresh: json.refresh_token || refreshToken,
-    expires: Date.now() + (json.expires_in ?? 3600) * 1000,
-  };
-};
 
 const shouldRefresh = (stored: StoredOAuth, now: number): boolean =>
   accessTokenIsExpiring(stored.expires, now) || jwtIsExpiring(stored.access, now);
 
-let refreshInFlight: Promise<StoredOAuth> | undefined;
+let refreshInFlight: Deferred.Deferred<StoredOAuth, AuthError> | undefined;
 
-const saveOAuth = async (path: string, next: TokenSet): Promise<StoredOAuth> => {
-  const file = await readAuthFile(path);
-  const stored: StoredOAuth = { type: "oauth", access: next.access, refresh: next.refresh, expires: next.expires };
-  const providers = { ...file.providers, [XAI.id]: stored };
-  await writeAuthFile(path, { default: XAI.id, providers });
-  return stored;
-};
-
-export const currentBearer = async (options?: {
-  env?: NodeJS.ProcessEnv;
-  path?: string;
-  fetch?: FetchLike;
-  now?: () => number;
-}): Promise<string> => {
-  const env = options?.env ?? process.env;
-  const path = options?.path ?? defaultAuthPath();
-  const fetchImpl = options?.fetch ?? fetch;
-  const now = options?.now ?? (() => Date.now());
-  const fromEnv = env.XAI_API_KEY?.trim();
-  const file = await readAuthFile(path);
-  const stored = file.providers[XAI.id];
-  if (stored?.type === "oauth") {
-    if (!shouldRefresh(stored, now())) return stored.access;
-    if (!refreshInFlight) {
-      const refreshToken = stored.refresh;
-      refreshInFlight = refreshAccessToken(refreshToken, fetchImpl)
-        .then((tokens) => saveOAuth(path, tokens))
-        .finally(() => {
-          refreshInFlight = undefined;
-        });
-    }
-    return (await refreshInFlight).access;
-  }
-  if (stored?.type === "api") return stored.key;
-  if (fromEnv) return fromEnv;
-  throw new Error("No xAI login. Run: bun run login");
-};
-
-export const sessionConfig = async (
-  options?: { env?: NodeJS.ProcessEnv; path?: string; fetch?: FetchLike; now?: () => number },
-): Promise<{ baseUrl: string; model: string; apiKey: string; headers: Record<string, string> }> => ({
-  baseUrl: XAI.baseUrl,
-  model: XAI.model,
-  apiKey: await currentBearer(options),
-  headers: { "x-grok-conv-id": randomUUID() },
-});
-
-export const saveLogin = async (path: string, tokens: TokenSet, existing?: AuthFile): Promise<void> => {
-  const file = existing ?? (await readAuthFile(path));
-  await writeAuthFile(path, {
-    default: XAI.id,
-    providers: {
-      ...file.providers,
-      [XAI.id]: { type: "oauth", access: tokens.access, refresh: tokens.refresh, expires: tokens.expires },
-    },
+const saveOAuth = (path: string, next: TokenSet) =>
+  Effect.gen(function* () {
+    const file = yield* readAuthFile(path);
+    const stored: StoredOAuth = {
+      type: "oauth",
+      access: next.access,
+      refresh: next.refresh,
+      expires: next.expires,
+    };
+    yield* writeAuthFile(path, { default: XAI.id, providers: { ...file.providers, [XAI.id]: stored } });
+    return stored;
   });
-};
+
+const refreshShared = (path: string, refreshToken: string, fetchImpl: FetchLike) =>
+  Effect.gen(function* () {
+    if (refreshInFlight) return yield* Deferred.await(refreshInFlight);
+    const deferred = Deferred.unsafeMake<StoredOAuth, AuthError>(FiberId.none);
+    refreshInFlight = deferred;
+    return yield* refreshAccessToken(refreshToken, fetchImpl).pipe(
+      Effect.flatMap((tokens) => saveOAuth(path, tokens)),
+      Effect.mapError((cause) => (cause instanceof AuthError ? cause : new AuthError({ message: cause.message }))),
+      Effect.tap((stored) => Deferred.succeed(deferred, stored)),
+      Effect.tapError((error) => Deferred.fail(deferred, error)),
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (refreshInFlight === deferred) refreshInFlight = undefined;
+        }),
+      ),
+    );
+  });
+
+export const currentBearer = (options?: Clock & { env?: NodeJS.ProcessEnv; path?: string }) =>
+  Effect.gen(function* () {
+    const env = options?.env ?? process.env;
+    const path = options?.path ?? defaultAuthPath();
+    const fetchImpl = options?.fetch ?? fetch;
+    const now = options?.now ?? (() => Date.now());
+    const fromEnv = env.XAI_API_KEY?.trim();
+    const file = yield* readAuthFile(path);
+    const stored = file.providers[XAI.id];
+    if (stored?.type === "oauth") {
+      if (!shouldRefresh(stored, now())) return stored.access;
+      return (yield* refreshShared(path, stored.refresh, fetchImpl)).access;
+    }
+    if (stored?.type === "api") return stored.key;
+    if (fromEnv) return fromEnv;
+    return yield* new AuthError({ message: "No xAI login. Run: bun run login" });
+  });
+
+export const sessionConfig = (options?: Clock & { env?: NodeJS.ProcessEnv; path?: string }) =>
+  Effect.gen(function* () {
+    return {
+      baseUrl: XAI.baseUrl,
+      model: XAI.model,
+      apiKey: yield* currentBearer(options),
+      headers: { "x-grok-conv-id": randomUUID() },
+    };
+  });
+
+export const saveLogin = (path: string, tokens: TokenSet, existing?: AuthFile) =>
+  Effect.gen(function* () {
+    const file = existing ?? (yield* readAuthFile(path));
+    yield* writeAuthFile(path, {
+      default: XAI.id,
+      providers: {
+        ...file.providers,
+        [XAI.id]: { type: "oauth", access: tokens.access, refresh: tokens.refresh, expires: tokens.expires },
+      },
+    });
+  });
