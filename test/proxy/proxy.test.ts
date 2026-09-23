@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, type AddressInfo } from "node:net";
 import { test } from "node:test";
-import { isBun, proxiedFetch, proxyUrl } from "../src/proxy.ts";
+import { isBun, proxiedFetch, proxyUrl } from "../../src/proxy.ts";
 
 const proxyKeys = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"] as const;
 

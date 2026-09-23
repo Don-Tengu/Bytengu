@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Effect } from "effect";
-import { runWorkspaceCommand } from "../src/chat.ts";
+import { runWorkspaceCommand } from "../../src/chat.ts";
 
 test("runWorkspaceCommand returns the shell exit code", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "bytengu-check-"));

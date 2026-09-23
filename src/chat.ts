@@ -4,8 +4,9 @@ import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { FileSystem } from "@effect/platform";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
-import { Config, Data, Effect, Either, Option, ParseResult, Redacted, Schema } from "effect";
+import { Data, Effect, Either, Option, ParseResult, Redacted, Schema } from "effect";
 import { proxiedFetch, proxyUrl } from "./proxy.ts";
+import { sessionConfig } from "./provider/xai.ts";
 import { emptyStreak, llmTools, runLLMToolsInOrder, DOOM_LOOP_THRESHOLD, type Result } from "./tools/index.ts";
 
 const LOOP_THRESHOLD = 30;
@@ -58,15 +59,20 @@ type AppConfig = {
   readonly baseUrl: string;
   readonly apiKey: Redacted.Redacted<string>;
   readonly model: string;
+  readonly headers: Readonly<Record<string, string>>;
 };
 
-const loadConfig = Effect.gen(function* () {
-  return {
-    baseUrl: yield* Config.string("BASE_URL"),
-    apiKey: yield* Config.redacted("API_KEY"),
-    model: yield* Config.string("MODEL"),
-  } satisfies AppConfig;
-});
+const loadConfig = Effect.tryPromise({
+  try: () => sessionConfig(),
+  catch: (cause) => new LLMError({ message: cause instanceof Error ? cause.message : String(cause) }),
+}).pipe(
+  Effect.map((session) => ({
+    baseUrl: session.baseUrl,
+    model: session.model,
+    apiKey: Redacted.make(session.apiKey),
+    headers: session.headers,
+  })),
+);
 
 const preview = (text: string, max = 800): string => {
   const trimmed = text.trim();
@@ -151,6 +157,7 @@ const postLLM = (dialog: readonly TranscriptMessage[], config: AppConfig) =>
             headers: {
               "Content-Type": "application/json",
               Authorization: `Bearer ${Redacted.value(config.apiKey)}`,
+              ...config.headers,
             },
             body: payload,
           }),
