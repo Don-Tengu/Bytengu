@@ -1,7 +1,0 @@
-{
-  "name": "write_file",
-  "arguments": {
-    "path": "add.js",
-    "content": "export function add(a, b) {\n  return a + b;\n}\n"
-  }
-}

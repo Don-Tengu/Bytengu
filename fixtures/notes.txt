@@ -1,2 +1,0 @@
-hello from notes.txt
-this file is the read_file target

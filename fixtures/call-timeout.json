@@ -1,6 +1,0 @@
-{
-  "name": "bash",
-  "arguments": {
-    "command": "sleep 5"
-  }
-}

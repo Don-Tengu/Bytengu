@@ -1,6 +1,0 @@
-{
-  "name": "read_file",
-  "arguments": {
-    "file": "wrong-field.json"
-  }
-}

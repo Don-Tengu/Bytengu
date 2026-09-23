@@ -1,11 +1,12 @@
+import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { FileSystem } from "@effect/platform";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
-import { Config, Data, Effect, ParseResult, Redacted, Schema } from "effect";
-import { ProxyAgent, setGlobalDispatcher } from "undici";
-import { llmTools, runLLMTool, type Result } from "./tools.ts";
+import { Config, Data, Effect, Either, Option, ParseResult, Redacted, Schema } from "effect";
+import { proxiedFetch, proxyUrl } from "./proxy.ts";
+import { emptyStreak, llmTools, runLLMToolsInOrder, DOOM_LOOP_THRESHOLD, type Result } from "./tools/index.ts";
 
 const LOOP_THRESHOLD = 30;
 
@@ -145,7 +146,7 @@ const postLLM = (dialog: readonly TranscriptMessage[], config: AppConfig) =>
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const res = yield* Effect.tryPromise({
         try: () =>
-          fetch(`${config.baseUrl}/chat/completions`, {
+          proxiedFetch(`${config.baseUrl}/chat/completions`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -195,15 +196,22 @@ const postLLM = (dialog: readonly TranscriptMessage[], config: AppConfig) =>
 const toolContent = (result: Result): string => (result.ok ? result.output : result.error);
 
 const configureProxy = Effect.sync(() => {
-  const proxyUrl =
-    process.env.HTTPS_PROXY ??
-    process.env.https_proxy ??
-    process.env.HTTP_PROXY ??
-    process.env.http_proxy;
-  if (!proxyUrl) return;
-  setGlobalDispatcher(new ProxyAgent(proxyUrl));
-  log(`fetch via proxy ${proxyUrl}`);
+  const proxy = proxyUrl();
+  if (!proxy) return;
+  log(`fetch via proxy ${proxy}`);
 });
+
+/** Run a shell command in the workspace and return its exit code. Output stays on the terminal. */
+export const runWorkspaceCommand = (command: string, cwd: string) =>
+  Effect.tryPromise({
+    try: () =>
+      new Promise<number>((resolvePromise, reject) => {
+        const child = spawn("/bin/bash", ["-lc", command], { cwd, stdio: "inherit" });
+        child.once("error", reject);
+        child.once("exit", (code) => resolvePromise(code ?? 1));
+      }),
+    catch: (cause) => new LLMError({ message: cause instanceof Error ? cause.message : String(cause) }),
+  });
 
 const isMainModule = (): boolean => {
   const entry = process.argv[1];
@@ -219,6 +227,7 @@ const program = Effect.gen(function* () {
     options: {
       out: { type: "string", default: "fixtures/messages.json" },
       cwd: { type: "string" },
+      test: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -230,17 +239,33 @@ const program = Effect.gen(function* () {
     return yield* Effect.fail(new LLMError({ message: "expected a non-empty prompt" }));
   }
 
-  const cwd = resolve(values.cwd ?? process.cwd());
+  const fs = yield* FileSystem.FileSystem;
+  const requestedCwd = resolve(values.cwd ?? process.cwd());
+  const info = yield* fs.stat(requestedCwd).pipe(Effect.option);
+  if (Option.isNone(info)) {
+    return yield* Effect.fail(new LLMError({ message: `workspace does not exist: ${requestedCwd}` }));
+  }
+  if (info.value.type !== "Directory") {
+    return yield* Effect.fail(new LLMError({ message: `workspace is not a directory: ${requestedCwd}` }));
+  }
+  const cwd = yield* fs.realPath(requestedCwd).pipe(
+    Effect.mapError((error) => new LLMError({ message: error.message })),
+  );
   const messages: TranscriptMessage[] = [
     {
       role: "system",
       content: [
-        "You are a coding agent working in a local git-less workspace.",
+        "You are a coding agent working in a local workspace.",
         `Workspace directory: ${cwd}`,
-        "Use only the tools read_file, write_file, and bash.",
-        "Paths passed to read_file/write_file must be relative to the workspace.",
-        "bash already runs inside the workspace; do not cd elsewhere.",
-        "To run tests, call bash with command: node --test",
+        "Tools: read_file, edit, write_file, grep, glob, and bash.",
+        "Paths are relative to the workspace. bash already runs there; do not cd elsewhere.",
+        "read_file returns at most 200 lines. Each line is prefixed with its number, a pipe, and a space (`12| `). That prefix is not part of the file. Use offset and limit to read further.",
+        "edit changes an existing file by exact old_string. read_file that file first. old_string must match the file text exactly, once, unless replace_all is true. Do not copy the line-number prefix into old_string or new_string.",
+        "write_file replaces a whole file or creates a new one, including parent directories. Prefer edit for files that already exist.",
+        "Use grep and glob to search. Do not use bash for find or grep.",
+        values.test
+          ? `To run tests, call bash with command: ${values.test}`
+          : "To run tests, call bash with command: node --test",
         "Keep editing and re-running tests until they pass, then stop.",
       ].join(" "),
     },
@@ -250,54 +275,85 @@ const program = Effect.gen(function* () {
   log(`model=${config.model} cwd=${cwd} steps<=${LOOP_THRESHOLD}`);
   log(`user: ${preview(prompt, 200)}`);
 
-  let lastText = "";
-  let i = 0;
-  for (; i < LOOP_THRESHOLD; ++i) {
-    log(`\n=== step ${i + 1} ===`);
-    const turn = yield* postLLM(messages, config);
-    const msg = turn.choice.message;
-
-    log(`finish_reason=${turn.choice.finish_reason ?? "?"}`);
-    if (msg.content) {
-      lastText = msg.content;
-      log(`assistant:\n${preview(msg.content)}`);
-    }
-
-    messages.push(turn.assistant);
-    const toolCalls = msg.tool_calls ?? [];
-    if (toolCalls.length === 0) break;
-
-    for (const toolCall of toolCalls) {
-      log(
-        `tool ${toolCall.function.name} [${toolCall.id}]\n  args: ${preview(toolCall.function.arguments, 400)}`,
-      );
-    }
-
-    const toolResults = yield* Effect.all(
-      toolCalls.map((toolCall) =>
-        runLLMTool(toolCall.function.name, toolCall.function.arguments, cwd).pipe(
-          Effect.map((result) => ({ tool_call_id: toolCall.id, result })),
-        ),
-      ),
-      { concurrency: "unbounded" },
-    );
-
-    for (const { tool_call_id, result } of toolResults) {
-      const content = toolContent(result);
-      log(`result [${tool_call_id}] ok=${result.ok}\n${preview(content)}`);
-      messages.push({ role: "tool", tool_call_id, content });
-    }
+  const testCommand = values.test;
+  if (testCommand) {
+    log(`\n=== tests before ===\n$ ${testCommand}`);
+    const before = yield* runWorkspaceCommand(testCommand, cwd);
+    log(`=== tests before exit ${before} ===`);
   }
 
-  if (i >= LOOP_THRESHOLD) log(`stopped: hit LOOP_THRESHOLD=${LOOP_THRESHOLD}`);
+  const outcome = yield* Effect.either(
+    Effect.gen(function* () {
+      const session = { reads: new Set<string>() };
+      let streak = emptyStreak();
+      let lastText = "";
+      let i = 0;
+      for (; i < LOOP_THRESHOLD; ++i) {
+        log(`\n=== step ${i + 1} ===`);
+        const turn = yield* postLLM(messages, config);
+        const msg = turn.choice.message;
 
-  const outPath = resolve(values.out ?? "fixtures/messages.json");
-  const fs = yield* FileSystem.FileSystem;
-  yield* fs.writeFileString(outPath, `${JSON.stringify(messages, null, 2)}\n`);
-  log(
-    `\n=== done steps=${Math.min(i + 1, LOOP_THRESHOLD)} messages=${messages.length} out=${outPath} ===`,
+        log(`finish_reason=${turn.choice.finish_reason ?? "?"}`);
+        if (msg.content) {
+          lastText = msg.content;
+          log(`assistant:\n${preview(msg.content)}`);
+        }
+
+        messages.push(turn.assistant);
+        const toolCalls = msg.tool_calls ?? [];
+        if (toolCalls.length === 0) break;
+
+        for (const toolCall of toolCalls) {
+          log(
+            `tool ${toolCall.function.name} [${toolCall.id}]\n  args: ${preview(toolCall.function.arguments, 400)}`,
+          );
+        }
+
+        const batch = yield* runLLMToolsInOrder(
+          toolCalls.map((toolCall) => ({
+            id: toolCall.id,
+            name: toolCall.function.name,
+            arguments: toolCall.function.arguments,
+          })),
+          cwd,
+          session,
+          streak,
+        );
+        streak = batch.streak;
+
+        for (const { tool_call_id, result } of batch.results) {
+          const content = toolContent(result);
+          log(`result [${tool_call_id}] ok=${result.ok}\n${preview(content)}`);
+          messages.push({ role: "tool", tool_call_id, content });
+        }
+        if (batch.stopped) {
+          log(`stopped: repeated the same tool call ${DOOM_LOOP_THRESHOLD} times`);
+          break;
+        }
+      }
+
+      if (i >= LOOP_THRESHOLD) log(`stopped: hit LOOP_THRESHOLD=${LOOP_THRESHOLD}`);
+
+      const outPath = resolve(values.out ?? "fixtures/messages.json");
+      yield* fs.writeFileString(outPath, `${JSON.stringify(messages, null, 2)}\n`);
+      log(
+        `\n=== done steps=${Math.min(i + 1, LOOP_THRESHOLD)} messages=${messages.length} out=${outPath} ===`,
+      );
+      if (lastText) console.log(lastText);
+    }),
   );
-  if (lastText) console.log(lastText);
+
+  if (testCommand) {
+    log(`\n=== tests after ===\n$ ${testCommand}`);
+    const after = yield* runWorkspaceCommand(testCommand, cwd);
+    log(`=== tests after exit ${after} ===`);
+    if (Either.isRight(outcome) && after !== 0) {
+      return yield* Effect.fail(
+        new LLMError({ message: `tests failed after the agent (exit ${after})` }),
+      );
+    }
+  }
+  if (Either.isLeft(outcome)) return yield* Effect.fail(outcome.left);
 });
 
 if (isMainModule()) {

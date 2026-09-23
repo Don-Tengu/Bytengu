@@ -2,48 +2,10 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug bash-cli (call-ls)",
-      "type": "node",
-      "request": "launch",
-      "runtimeExecutable": "tsx",
-      "args": [
-        "${workspaceFolder}/src/bash-cli.ts",
-        "--input",
-        "fixtures/call-ls.json"
-      ],
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"]
-    },
-    {
-      "name": "Debug bash-cli (call-read)",
-      "type": "node",
-      "request": "launch",
-      "runtimeExecutable": "tsx",
-      "args": [
-        "${workspaceFolder}/src/bash-cli.ts",
-        "--input",
-        "fixtures/call-read.json"
-      ],
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"]
-    },
-    {
-      "name": "Debug hello.ts",
-      "type": "node",
-      "request": "launch",
-      "runtimeExecutable": "tsx",
-      "args": ["${workspaceFolder}/src/hello.ts"],
-      "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"]
-    },
-    {
       "name": "Debug current TypeScript file",
       "type": "node",
       "request": "launch",
-      "runtimeExecutable": "tsx",
+      "runtimeExecutable": "bun",
       "args": ["${file}"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
