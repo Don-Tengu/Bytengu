@@ -28,7 +28,7 @@ The user can also run `/bytengu`.
 Run from this directory. Bun is the only runtime. Do not add npm scripts that call `tsx` or `node`.
 
 - `bun run login` — Grok device-code login. Writes `~/.bytengu/auth.json` mode `0600`.
-- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--test "<cmd>"` runs that command in `<dir>` before and after the model. Optional `--out <file>`.
+- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--out <file>`.
 - `bun test` — unit tests under `test/`. They must not call xAI.
 - `bun run typecheck`
 

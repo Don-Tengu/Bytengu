@@ -17,7 +17,7 @@ export const login = Effect.gen(function* () {
   const tokens = yield* pollDeviceToken(device);
   const path = defaultAuthPath();
   yield* saveLogin(path, tokens);
-  yield* Effect.sync(() => console.error(`已登入 xAI。之後的請求使用 grok-4.7。憑證在 ${path}`));
+  yield* Effect.sync(() => console.error(`Signed in to xAI. Later requests use grok-4.7. Credentials are at ${path}`));
 });
 
 if (isMainModule()) {

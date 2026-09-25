@@ -2,14 +2,21 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug current TypeScript file",
-      "type": "node",
+      "name": "Debug login",
+      "type": "bun",
       "request": "launch",
-      "runtimeExecutable": "bun",
-      "args": ["${file}"],
+      "runtime": "bun",
+      "program": "${workspaceFolder}/src/login.ts",
       "cwd": "${workspaceFolder}",
-      "console": "integratedTerminal",
-      "skipFiles": ["<node_internals>/**", "${workspaceFolder}/node_modules/**"]
+      "stopOnEntry": false
+    },
+    {
+      "name": "Debug current TypeScript file",
+      "type": "bun",
+      "request": "launch",
+      "runtime": "bun",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}"
     }
   ]
 }

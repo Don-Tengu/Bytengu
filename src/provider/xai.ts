@@ -148,9 +148,9 @@ export const requestDeviceCode = (fetchImpl: FetchLike = fetch) =>
 
 export const loginInstructions = (device: DeviceCode): string =>
   [
-    "用瀏覽器登入 Grok，然後輸入這組短碼。",
+    "Sign in to Grok in the browser, then enter this code.",
     device.verificationUriComplete ?? device.verificationUri,
-    `短碼: ${device.userCode}`,
+    `Code: ${device.userCode}`,
   ].join("\n");
 
 export const pollDeviceToken = (device: DeviceCode, options: Clock = {}) =>
