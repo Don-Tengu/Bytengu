@@ -28,7 +28,7 @@ The user can also run `/bytengu`.
 Run from this directory. Bun is the only runtime. Do not add npm scripts that call `tsx` or `node`.
 
 - `bun run login` — Grok device-code login. Writes `~/.bytengu/auth.json` mode `0600`.
-- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--out <file>`.
+- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--out <file>`. Optional `--profile read-only|workspace-write|full`. The default profile is `workspace-write`.
 - `bun test` — unit tests under `test/`. They must not call xAI.
 - `bun run typecheck`
 
@@ -76,6 +76,8 @@ Paths stay inside the workspace after `realpath`. A symlink that leaves the work
 
 `grep` and `glob` prefer `rg`. Tests set `BYTENGU_NO_RG=1` to force the walk. Do not shell out to `find` or `grep` from the model prompt as the search path.
 
+`--profile` selects an approval profile: `read-only`, `workspace-write`, or `full`. The default profile is `workspace-write`. `full` applies only when that name is passed. `read-only` still runs `read_file`, `grep`, and `glob`. `bash`, `edit`, and `write_file` return a tool failure and leave the workspace unchanged. `workspace-write` keeps `edit` and `write_file` inside the realpath jail and runs `bash` through `sandbox-exec`. `full` runs `bash` as unsandboxed `/bin/bash -lc`.
+
 ## Auth
 
 Bearer resolution, in order: oauth record in the auth file, then a stored api record, then `XAI_API_KEY`. A saved oauth login wins over `XAI_API_KEY`. Refresh when the stored expiry or the JWT `exp` is inside two minutes. One refresh at a time. Never print access or refresh tokens.
@@ -86,4 +88,4 @@ The device-code client id is the public Grok CLI client. `referrer` is `bytengu`
 
 ## Do not build yet
 
-Interactive multi-turn sessions, `--resume`, permission prompts, streaming, compaction, the Responses API, Anthropic's message format, and a TUI. When a provider is added, give it a `baseUrl`, a default model, and a `bearer()` next to xAI. A different wire protocol gets its own `complete()` behind that provider. It does not fork `src/chat.ts`.
+Interactive multi-turn sessions, `--resume`, interactive yes/no permission prompts, streaming, compaction, the Responses API, Anthropic's message format, and a TUI. Approval profiles on the one-shot command are the `--profile` flag above. When a provider is added, give it a `baseUrl`, a default model, and a `bearer()` next to xAI. A different wire protocol gets its own `complete()` behind that provider. It does not fork `src/chat.ts`.

@@ -104,3 +104,70 @@ test("chat docs do not offer --test", () => {
   assert.match(commands, /Optional `--out <file>`\./);
   assert.doesNotMatch(commands, /--test/);
 });
+
+const profileName = (args: readonly string[]): string => {
+  const index = args.indexOf("--profile");
+  const value = index === -1 ? undefined : args[index + 1];
+  if (value === "read-only" || value === "full") return value;
+  return "workspace-write";
+};
+
+test("chat accepts the three profiles and rejects an unknown name before login", async () => {
+  const home = mkdtempSync(join(tmpdir(), "bytengu-chat-home-"));
+  const out = join(home, "messages.json");
+  try {
+    const accepted = [
+      ["--out", out, "hello"],
+      ["--profile", "workspace-write", "--out", out, "hello"],
+      ["--profile", "read-only", "--out", out, "hello"],
+      ["--profile", "full", "--out", out, "hello"],
+    ] as const;
+    for (const args of accepted) {
+      const result = await runChat(args, home);
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, new RegExp(`profile=${profileName(args)}`));
+      assert.match(result.stderr, /login/);
+      assert.doesNotMatch(output, /api\.x\.ai/);
+      assert.equal(existsSync(out), false);
+    }
+
+    const unknown = await runChat(["--profile", "nope", "--out", out, "hello"], home);
+    const unknownOutput = `${unknown.stdout}\n${unknown.stderr}`;
+    assert.notEqual(unknown.code, 0);
+    assert.match(unknown.stderr, /unknown profile: nope/);
+    assert.doesNotMatch(unknown.stderr, /login/i);
+    assert.doesNotMatch(unknown.stderr, /credential/i);
+    assert.doesNotMatch(unknown.stderr, /XAI_API_KEY/);
+    assert.doesNotMatch(unknownOutput, /api\.x\.ai/);
+    assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("two default launches both name workspace-write and skip the transcript", async () => {
+  const home = mkdtempSync(join(tmpdir(), "bytengu-chat-home-"));
+  const out = join(home, "messages.json");
+  try {
+    for (let launch = 0; launch < 2; launch++) {
+      const result = await runChat(["--out", out, "hello"], home);
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /profile=workspace-write/);
+      assert.match(result.stderr, /login/);
+      assert.equal(existsSync(out), false);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("docs name the approval profiles and leave yes/no prompts unbuilt", () => {
+  const agents = readFileSync(join(repoRoot, "AGENTS.md"), "utf8");
+  assert.match(agents, /--profile read-only\|workspace-write\|full/);
+  assert.match(agents, /The default profile is `workspace-write`/);
+  assert.match(agents, /runs `bash` through `sandbox-exec`/);
+  assert.match(agents, /unsandboxed `\/bin\/bash -lc`/);
+  const unbuilt = agents.split("## Do not build yet")[1] ?? "";
+  assert.match(unbuilt, /interactive yes\/no permission prompts/);
+});

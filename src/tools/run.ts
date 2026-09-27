@@ -6,6 +6,7 @@ import { invokeReadFile } from "./read.ts";
 import { invokeGlob, invokeGrep } from "./search.ts";
 import { ToolCall } from "./schema.ts";
 import { workspaceReal } from "./path.ts";
+import { DEFAULT_APPROVAL_PROFILE, readOnlyRefusal, type ApprovalProfile } from "./profile.ts";
 import { invokeWriteFile } from "./write.ts";
 import {
   DEFAULT_TIMEOUT_MS,
@@ -36,8 +37,11 @@ export const runTool = (
   cwd: string,
   timeout = DEFAULT_TIMEOUT_MS,
   session?: ToolSession,
+  profile: ApprovalProfile = DEFAULT_APPROVAL_PROFILE,
 ): Effect.Effect<Ok, ToolFailure, FileSystem.FileSystem> =>
   Effect.gen(function* () {
+    const refusal = readOnlyRefusal(profile, call.name);
+    if (refusal) return yield* Effect.fail(new ToolFailure({ message: refusal }));
     // `/tmp` is a symlink to `/private/tmp` on macOS. Relative paths are only stable
     // when every tool uses the same real workspace root.
     const root = yield* workspaceReal(cwd);
@@ -53,7 +57,7 @@ export const runTool = (
       case "glob":
         return yield* invokeGlob(call, root, timeout);
       case "bash":
-        return yield* invokeBash(call, root, timeout);
+        return yield* invokeBash(call, root, timeout, profile);
     }
   });
 
@@ -64,6 +68,7 @@ export const runLLMTool = (
   cwd: string,
   timeout = DEFAULT_TIMEOUT_MS,
   session?: ToolSession,
+  profile: ApprovalProfile = DEFAULT_APPROVAL_PROFILE,
 ): Effect.Effect<Result, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const args = yield* Effect.try({
@@ -71,7 +76,7 @@ export const runLLMTool = (
       catch: () => new ToolFailure({ message: `invalid arguments JSON: ${argumentsJson}` }),
     });
     const call = yield* decodeToolCall({ name, arguments: args });
-    return yield* runTool(call, cwd, timeout, session);
+    return yield* runTool(call, cwd, timeout, session, profile);
   }).pipe(
     Effect.match({
       onFailure: (error): Result => ({ ok: false, error: error.message }),
@@ -90,6 +95,7 @@ export const runLLMToolsInOrder = (
   session: ToolSession,
   streak: RepeatStreak,
   timeout = DEFAULT_TIMEOUT_MS,
+  profile: ApprovalProfile = DEFAULT_APPROVAL_PROFILE,
 ): Effect.Effect<ToolBatch, never, FileSystem.FileSystem> =>
   Effect.gen(function* () {
     const results: Array<{ tool_call_id: string; result: Result }> = [];
@@ -108,7 +114,7 @@ export const runLLMToolsInOrder = (
         continue;
       }
       current = next;
-      const result = yield* runLLMTool(call.name, call.arguments, cwd, timeout, session);
+      const result = yield* runLLMTool(call.name, call.arguments, cwd, timeout, session, profile);
       results.push({ tool_call_id: call.id, result });
     }
     return { results, streak: current, stopped };

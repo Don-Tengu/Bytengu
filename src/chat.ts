@@ -6,7 +6,16 @@ import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
 import { Data, Effect, Option, ParseResult, Redacted, Schema } from "effect";
 import { proxiedFetch, proxyUrl } from "./proxy.ts";
 import { sessionConfig } from "./provider/xai.ts";
-import { emptyStreak, llmTools, runLLMToolsInOrder, DOOM_LOOP_THRESHOLD, type Result } from "./tools/index.ts";
+import {
+  DEFAULT_APPROVAL_PROFILE,
+  DEFAULT_TIMEOUT_MS,
+  emptyStreak,
+  isApprovalProfile,
+  llmTools,
+  runLLMToolsInOrder,
+  DOOM_LOOP_THRESHOLD,
+  type Result,
+} from "./tools/index.ts";
 
 const LOOP_THRESHOLD = 30;
 
@@ -219,6 +228,12 @@ export const systemPrompt = (cwd: string): string =>
     "Use grep and glob to search. Do not use bash for find or grep.",
   ].join(" ");
 
+const resolveProfile = (value: string | undefined) => {
+  if (value === undefined) return Effect.succeed(DEFAULT_APPROVAL_PROFILE);
+  if (isApprovalProfile(value)) return Effect.succeed(value);
+  return Effect.fail(new LLMError({ message: `unknown profile: ${value}` }));
+};
+
 const isMainModule = (): boolean => {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -233,10 +248,14 @@ const program = Effect.gen(function* () {
     options: {
       out: { type: "string", default: "fixtures/messages.json" },
       cwd: { type: "string" },
+      profile: { type: "string" },
     },
     allowPositionals: true,
     strict: true,
   });
+
+  const profile = yield* resolveProfile(values.profile);
+  log(`profile=${profile}`);
 
   const config = yield* loadConfig;
   const prompt = positionals.join("\n");
@@ -264,7 +283,7 @@ const program = Effect.gen(function* () {
     { role: "user", content: prompt },
   ];
 
-  log(`model=${config.model} cwd=${cwd} steps<=${LOOP_THRESHOLD}`);
+  log(`model=${config.model} cwd=${cwd} profile=${profile} steps<=${LOOP_THRESHOLD}`);
   log(`user: ${preview(prompt, 200)}`);
 
   const session = { reads: new Set<string>() };
@@ -301,6 +320,8 @@ const program = Effect.gen(function* () {
       cwd,
       session,
       streak,
+      DEFAULT_TIMEOUT_MS,
+      profile,
     );
     streak = batch.streak;
 
@@ -326,5 +347,15 @@ const program = Effect.gen(function* () {
 });
 
 if (isMainModule()) {
-  NodeRuntime.runMain(program.pipe(Effect.provide(NodeFileSystem.layer)));
+  NodeRuntime.runMain(
+    program.pipe(
+      Effect.provide(NodeFileSystem.layer),
+      Effect.catchAll((error) =>
+        Effect.sync(() => {
+          console.error(error.message);
+          process.exit(1);
+        }),
+      ),
+    ),
+  );
 }
