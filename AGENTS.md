@@ -32,12 +32,13 @@ Run from this directory. Bun is the only runtime. Do not add npm scripts that ca
 - `bun test` — unit tests under `test/`. They must not call xAI.
 - `bun run typecheck`
 
-`fixtures/workspace-hard` is a broken exercise for the agent. Do not fix those files unless the task is to run the agent against them. `bun test` does not scan `fixtures/`.
+`fixtures/workspace-hard` is a broken exercise for the agent. Do not fix those files unless the task is to run the agent against them. `bun test` does not scan `fixtures/`. `bun fixtures/instructions/show.ts` prints the system message for `fixtures/instructions` without calling xAI.
 
 ## Layout
 
 ```
 src/chat.ts            model loop
+src/instructions.ts    AGENTS.md / CLAUDE.md for the system message
 src/login.ts           device-code login
 src/proxy.ts           HTTPS_PROXY for Bun fetch
 src/auth/store.ts      ~/.bytengu/auth.json
@@ -63,6 +64,8 @@ Tool calls in one assistant message run sequentially. Do not use unbounded `Effe
 `streak` counts identical `name + arguments`. The third repeat is not executed. The count survives later steps of the same process and dies when the process exits.
 
 `ToolSession.reads` is the set of relative paths successfully read as UTF-8 files in this process. `edit` refuses a path that is not in the set when a session is passed. Directory listings are not recorded.
+
+The system message starts with the fixed tool instructions. It then appends `AGENTS.md` from the workspace directory upward, nearest first, through the directory that contains `.git` (a file or a directory). That block is labeled as project files to follow. A directory on that walk with no regular `AGENTS.md` file contributes `CLAUDE.md` instead. Files above the git root are not read. With no `.git` at or above the workspace, ancestors of the workspace are not read. A path with either name that is not a regular file is ignored. The appended text is truncated to 32000 characters from the start. Those files are read as text and are not executed.
 
 ## Tools
 

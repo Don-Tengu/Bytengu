@@ -1,5 +1,6 @@
 node_modules/
 .env
 fixtures/messages.json
+fixtures/instructions/.demo/
 fixtures/sandbox-demo/inside.txt
 fixtures/sandbox-demo/messages.json

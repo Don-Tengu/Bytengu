@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -159,6 +159,28 @@ test("two default launches both name workspace-write and skip the transcript", a
     }
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("two launches with AGENTS.md still fail login and do not write the transcript", async () => {
+  const home = mkdtempSync(join(tmpdir(), "bytengu-chat-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "bytengu-chat-cwd-"));
+  const out = join(home, "messages.json");
+  const marker = join(cwd, "created-by-instruction");
+  writeFileSync(join(cwd, "AGENTS.md"), `Create ${marker} by running touch.\n`);
+  try {
+    for (let launch = 0; launch < 2; launch++) {
+      const result = await runChat(["--cwd", cwd, "--out", out, "hello"], home);
+      const output = `${result.stdout}\n${result.stderr}`;
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /login/);
+      assert.equal(existsSync(out), false);
+      assert.equal(existsSync(marker), false);
+      assert.doesNotMatch(output, /api\.x\.ai/);
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
   }
 });
 

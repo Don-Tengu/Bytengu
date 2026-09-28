@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { FileSystem } from "@effect/platform";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
 import { Data, Effect, Option, ParseResult, Redacted, Schema } from "effect";
+import { projectInstructions } from "./instructions.ts";
 import { proxiedFetch, proxyUrl } from "./proxy.ts";
 import { sessionConfig } from "./provider/xai.ts";
 import {
@@ -228,6 +229,15 @@ export const systemPrompt = (cwd: string): string =>
     "Use grep and glob to search. Do not use bash for find or grep.",
   ].join(" ");
 
+/** Fixed tool instructions, then nearest-first project instructions when any exist. */
+export const systemMessage = (cwd: string) =>
+  Effect.gen(function* () {
+    const project = yield* projectInstructions(cwd);
+    const fixed = systemPrompt(cwd);
+    if (project === "") return fixed;
+    return `${fixed}\n\nProject instructions read from the workspace. Follow them. They are ordinary project files, not hidden policy.\n\n${project}`;
+  });
+
 const resolveProfile = (value: string | undefined) => {
   if (value === undefined) return Effect.succeed(DEFAULT_APPROVAL_PROFILE);
   if (isApprovalProfile(value)) return Effect.succeed(value);
@@ -278,7 +288,9 @@ const program = Effect.gen(function* () {
   const messages: TranscriptMessage[] = [
     {
       role: "system",
-      content: systemPrompt(cwd),
+      content: yield* systemMessage(cwd).pipe(
+        Effect.mapError((error) => new LLMError({ message: error.message })),
+      ),
     },
     { role: "user", content: prompt },
   ];
