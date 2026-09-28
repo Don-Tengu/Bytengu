@@ -28,7 +28,7 @@ The user can also run `/bytengu`.
 Run from this directory. Bun is the only runtime. Do not add npm scripts that call `tsx` or `node`.
 
 - `bun run login` — Grok device-code login. Writes `~/.bytengu/auth.json` mode `0600`.
-- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--out <file>`. Optional `--profile read-only|workspace-write|full`. The default profile is `workspace-write`.
+- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--out <file>`. Optional `--profile read-only|workspace-write|full`. Optional `--format human|json`. The default profile is `workspace-write`. The default format is `human`: stdout is the final assistant text, and progress stays on stderr.
 - `bun test` — unit tests under `test/`. They must not call xAI.
 - `bun run typecheck`
 
@@ -38,6 +38,7 @@ Run from this directory. Bun is the only runtime. Do not add npm scripts that ca
 
 ```
 src/chat.ts            model loop
+src/headless.ts        exit codes, JSON events, audit lines
 src/instructions.ts    AGENTS.md / CLAUDE.md for the system message
 src/login.ts           device-code login
 src/proxy.ts           HTTPS_PROXY for Bun fetch
@@ -66,6 +67,21 @@ Tool calls in one assistant message run sequentially. Do not use unbounded `Effe
 `ToolSession.reads` is the set of relative paths successfully read as UTF-8 files in this process. `edit` refuses a path that is not in the set when a session is passed. Directory listings are not recorded.
 
 The system message starts with the fixed tool instructions. It then appends `AGENTS.md` from the workspace directory upward, nearest first, through the directory that contains `.git` (a file or a directory). That block is labeled as project files to follow. A directory on that walk with no regular `AGENTS.md` file contributes `CLAUDE.md` instead. Files above the git root are not read. With no `.git` at or above the workspace, ancestors of the workspace are not read. A path with either name that is not a regular file is ignored. The appended text is truncated to 32000 characters from the start. Those files are read as text and are not executed.
+
+## Headless contract
+
+The one-shot process uses one exit table. The same case returns the same code on every launch.
+
+- `0` — clean stop. The assistant message has no tool calls. A tool result `{ ok: false }` does not change this: if the assistant then stops with no tool calls, the process still exits `0`.
+- `1` — startup or model error. An unknown profile, an unknown format, an empty prompt, missing auth, a missing workspace, a workspace that is not a directory, or a failed model request.
+- `2` — the loop reached the 30-step cap.
+- `3` — the same tool name and arguments was repeated 3 times. That call is not executed.
+
+`--format human` is the default. Stdout is the final assistant text only. `--format json` writes only JSON objects, one per line, in order: a `step` event for every model step that started (`{"type":"step","step":1}`), a `tool` event for each recorded tool call (`{"type":"tool","name":"read_file","ok":true}`), an `assistant` event with the final assistant text when there is any, and a closing `done` event (`{"type":"done","reason":"clean"}`). `done.reason` is `clean`, `error`, `step-cap`, or `repeated-tool`, the same reason that selected the exit code, including when the exit is `1` and no step started. JSON events omit tool arguments, tool output, file bodies, access tokens, refresh tokens, and API keys.
+
+`--out` is written for a clean stop, the 30-step cap, the repeated-tool stop, and a model-request failure after a completed assistant turn. It is not written for a pre-loop failure (unknown profile, unknown format, empty prompt, missing auth, missing workspace, or a workspace that is not a directory).
+
+Each recorded tool call appends one line to `~/.bytengu/audit.log`. The file mode is `0600`. A later run appends and does not rewrite earlier lines. A run with no tool calls appends no line. The refused third repeat is a failure line. Each line has a timestamp, the approval profile, the workspace directory, the tool name, whether the result was ok or a failure (`ok`), and the process stop reason (`reason`). Lines omit tool arguments, tool output, file bodies, and tokens. Human stdout and JSON stdout use the same audit file.
 
 ## Tools
 

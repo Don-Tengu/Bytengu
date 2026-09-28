@@ -14,6 +14,7 @@ const childEnv = (home: string): NodeJS.ProcessEnv => {
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
   for (const key of [
     "XAI_API_KEY",
+    "BYTENGU_BASE_URL",
     "HTTPS_PROXY",
     "https_proxy",
     "HTTP_PROXY",

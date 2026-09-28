@@ -1,9 +1,19 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 import { FileSystem } from "@effect/platform";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
-import { Data, Effect, Option, ParseResult, Redacted, Schema } from "effect";
+import { Cause, Data, Effect, Either, Exit, Option, ParseResult, Redacted, Schema } from "effect";
+import {
+  DEFAULT_HEADLESS_FORMAT,
+  auditLine,
+  auditLogPath,
+  exitCodeFor,
+  headlessLine,
+  isHeadlessFormat,
+  type HeadlessFormat,
+  type StopReason,
+} from "./headless.ts";
 import { projectInstructions } from "./instructions.ts";
 import { proxiedFetch, proxyUrl } from "./proxy.ts";
 import { sessionConfig } from "./provider/xai.ts";
@@ -15,6 +25,7 @@ import {
   llmTools,
   runLLMToolsInOrder,
   DOOM_LOOP_THRESHOLD,
+  type ApprovalProfile,
   type Result,
 } from "./tools/index.ts";
 
@@ -71,12 +82,22 @@ type AppConfig = {
   readonly headers: Readonly<Record<string, string>>;
 };
 
+/**
+ * Tests point this process at a local completion server.
+ * Production leaves the variable unset, so requests stay on xAI. Not a provider switch.
+ */
+const completionsBaseUrl = (fallback: string): string => {
+  const override = process.env.BYTENGU_BASE_URL?.trim();
+  if (!override) return fallback;
+  return override.replace(/\/$/, "");
+};
+
 const loadConfig = Effect.gen(function* () {
   const session = yield* sessionConfig().pipe(
     Effect.mapError((error) => new LLMError({ message: error.message })),
   );
   return {
-    baseUrl: session.baseUrl,
+    baseUrl: completionsBaseUrl(session.baseUrl),
     model: session.model,
     apiKey: Redacted.make(session.apiKey),
     headers: session.headers,
@@ -238,11 +259,47 @@ export const systemMessage = (cwd: string) =>
     return `${fixed}\n\nProject instructions read from the workspace. Follow them. They are ordinary project files, not hidden policy.\n\n${project}`;
   });
 
-const resolveProfile = (value: string | undefined) => {
-  if (value === undefined) return Effect.succeed(DEFAULT_APPROVAL_PROFILE);
-  if (isApprovalProfile(value)) return Effect.succeed(value);
-  return Effect.fail(new LLMError({ message: `unknown profile: ${value}` }));
+type RecordedTool = {
+  readonly name: string;
+  readonly ok: boolean;
 };
+
+/** Stderr message, and a closing JSON event when that format was selected. No transcript. */
+const failEarly = (format: HeadlessFormat, message: string) =>
+  Effect.sync(() => {
+    if (format === "json") console.log(headlessLine({ type: "done", reason: "error" }));
+    console.error(message);
+    return 1;
+  });
+
+const appendAudit = (
+  recorded: readonly RecordedTool[],
+  reason: StopReason,
+  profile: ApprovalProfile,
+  cwd: string,
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = auditLogPath();
+    const directory = dirname(path);
+    yield* fs.makeDirectory(directory, { recursive: true });
+    yield* fs.chmod(directory, 0o700);
+    const time = new Date().toISOString();
+    const body = recorded
+      .map((tool) =>
+        auditLine({
+          time,
+          profile,
+          cwd,
+          tool: tool.name,
+          ok: tool.ok,
+          reason,
+        }),
+      )
+      .join("");
+    yield* fs.writeFileString(path, body, { flag: "a", mode: 0o600 });
+    yield* fs.chmod(path, 0o600);
+  });
 
 const isMainModule = (): boolean => {
   const entry = process.argv[1];
@@ -253,45 +310,68 @@ const isMainModule = (): boolean => {
 const program = Effect.gen(function* () {
   yield* configureProxy;
 
-  const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
-    options: {
-      out: { type: "string", default: "fixtures/messages.json" },
-      cwd: { type: "string" },
-      profile: { type: "string" },
-    },
-    allowPositionals: true,
-    strict: true,
-  });
+  const parsed = yield* Effect.try({
+    try: () =>
+      parseArgs({
+        args: process.argv.slice(2),
+        options: {
+          out: { type: "string", default: "fixtures/messages.json" },
+          cwd: { type: "string" },
+          profile: { type: "string" },
+          format: { type: "string" },
+        },
+        allowPositionals: true,
+        strict: true,
+      }),
+    catch: (cause) => new LLMError({ message: cause instanceof Error ? cause.message : String(cause) }),
+  }).pipe(Effect.either);
+  if (Either.isLeft(parsed)) return yield* failEarly("human", parsed.left.message);
+  const { values, positionals } = parsed.right;
 
-  const profile = yield* resolveProfile(values.profile);
+  const formatArg = values.format;
+  if (formatArg !== undefined && !isHeadlessFormat(formatArg)) {
+    return yield* failEarly("human", `unknown format: ${formatArg}`);
+  }
+  const format: HeadlessFormat = formatArg ?? DEFAULT_HEADLESS_FORMAT;
+
+  const profileArg = values.profile;
+  if (profileArg !== undefined && !isApprovalProfile(profileArg)) {
+    return yield* failEarly(format, `unknown profile: ${profileArg}`);
+  }
+  const profile: ApprovalProfile = profileArg ?? DEFAULT_APPROVAL_PROFILE;
   log(`profile=${profile}`);
 
-  const config = yield* loadConfig;
+  const loaded = yield* loadConfig.pipe(Effect.either);
+  if (Either.isLeft(loaded)) return yield* failEarly(format, loaded.left.message);
+  const config = loaded.right;
+
   const prompt = positionals.join("\n");
-  if (prompt.trim() === "") {
-    return yield* Effect.fail(new LLMError({ message: "expected a non-empty prompt" }));
-  }
+  if (prompt.trim() === "") return yield* failEarly(format, "expected a non-empty prompt");
 
   const fs = yield* FileSystem.FileSystem;
   const requestedCwd = resolve(values.cwd ?? process.cwd());
   const info = yield* fs.stat(requestedCwd).pipe(Effect.option);
   if (Option.isNone(info)) {
-    return yield* Effect.fail(new LLMError({ message: `workspace does not exist: ${requestedCwd}` }));
+    return yield* failEarly(format, `workspace does not exist: ${requestedCwd}`);
   }
   if (info.value.type !== "Directory") {
-    return yield* Effect.fail(new LLMError({ message: `workspace is not a directory: ${requestedCwd}` }));
+    return yield* failEarly(format, `workspace is not a directory: ${requestedCwd}`);
   }
-  const cwd = yield* fs.realPath(requestedCwd).pipe(
+  const resolved = yield* fs.realPath(requestedCwd).pipe(
     Effect.mapError((error) => new LLMError({ message: error.message })),
+    Effect.either,
   );
+  if (Either.isLeft(resolved)) return yield* failEarly(format, resolved.left.message);
+  const cwd = resolved.right;
+
+  const instructions = yield* systemMessage(cwd).pipe(
+    Effect.mapError((error) => new LLMError({ message: error.message })),
+    Effect.either,
+  );
+  if (Either.isLeft(instructions)) return yield* failEarly(format, instructions.left.message);
+
   const messages: TranscriptMessage[] = [
-    {
-      role: "system",
-      content: yield* systemMessage(cwd).pipe(
-        Effect.mapError((error) => new LLMError({ message: error.message })),
-      ),
-    },
+    { role: "system", content: instructions.right },
     { role: "user", content: prompt },
   ];
 
@@ -301,12 +381,24 @@ const program = Effect.gen(function* () {
   const session = { reads: new Set<string>() };
   let streak = emptyStreak();
   let lastText = "";
-  let i = 0;
-  for (; i < LOOP_THRESHOLD; ++i) {
-    log(`\n=== step ${i + 1} ===`);
-    const turn = yield* postLLM(messages, config);
-    const msg = turn.choice.message;
+  let reason: StopReason = "step-cap";
+  let sawAssistant = false;
+  let errorMessage = "";
+  const recorded: RecordedTool[] = [];
 
+  for (let i = 0; i < LOOP_THRESHOLD; ++i) {
+    log(`\n=== step ${i + 1} ===`);
+    if (format === "json") console.log(headlessLine({ type: "step", step: i + 1 }));
+
+    const posted = yield* postLLM(messages, config).pipe(Effect.either);
+    if (Either.isLeft(posted)) {
+      reason = "error";
+      errorMessage = posted.left.message;
+      break;
+    }
+
+    const turn = posted.right;
+    const msg = turn.choice.message;
     log(`finish_reason=${turn.choice.finish_reason ?? "?"}`);
     if (msg.content) {
       lastText = msg.content;
@@ -314,13 +406,15 @@ const program = Effect.gen(function* () {
     }
 
     messages.push(turn.assistant);
+    sawAssistant = true;
     const toolCalls = msg.tool_calls ?? [];
-    if (toolCalls.length === 0) break;
+    if (toolCalls.length === 0) {
+      reason = "clean";
+      break;
+    }
 
     for (const toolCall of toolCalls) {
-      log(
-        `tool ${toolCall.function.name} [${toolCall.id}]\n  args: ${preview(toolCall.function.arguments, 400)}`,
-      );
+      log(`tool ${toolCall.function.name} [${toolCall.id}]`);
     }
 
     const batch = yield* runLLMToolsInOrder(
@@ -337,37 +431,71 @@ const program = Effect.gen(function* () {
     );
     streak = batch.streak;
 
-    for (const { tool_call_id, result } of batch.results) {
-      const content = toolContent(result);
-      log(`result [${tool_call_id}] ok=${result.ok}\n${preview(content)}`);
-      messages.push({ role: "tool", tool_call_id, content });
+    for (let index = 0; index < batch.results.length; index++) {
+      const toolCall = toolCalls[index];
+      const row = batch.results[index];
+      if (!toolCall || !row) continue;
+      const name = toolCall.function.name;
+      const ok = row.result.ok;
+      recorded.push({ name, ok });
+      if (format === "json") console.log(headlessLine({ type: "tool", name, ok }));
+      log(`result [${row.tool_call_id}] ok=${ok}`);
+      messages.push({ role: "tool", tool_call_id: row.tool_call_id, content: toolContent(row.result) });
     }
     if (batch.stopped) {
+      reason = "repeated-tool";
       log(`stopped: repeated the same tool call ${DOOM_LOOP_THRESHOLD} times`);
       break;
     }
   }
 
-  if (i >= LOOP_THRESHOLD) log(`stopped: hit LOOP_THRESHOLD=${LOOP_THRESHOLD}`);
+  if (reason === "step-cap") log(`stopped: hit LOOP_THRESHOLD=${LOOP_THRESHOLD}`);
 
   const outPath = resolve(values.out ?? "fixtures/messages.json");
-  yield* fs.writeFileString(outPath, `${JSON.stringify(messages, null, 2)}\n`);
+  const writeTranscript =
+    reason === "clean" || reason === "step-cap" || reason === "repeated-tool" || sawAssistant;
+  if (writeTranscript) {
+    yield* fs.writeFileString(outPath, `${JSON.stringify(messages, null, 2)}\n`);
+  }
+  if (recorded.length > 0) yield* appendAudit(recorded, reason, profile, cwd);
+
   log(
-    `\n=== done steps=${Math.min(i + 1, LOOP_THRESHOLD)} messages=${messages.length} out=${outPath} ===`,
+    writeTranscript
+      ? `\n=== done messages=${messages.length} out=${outPath} reason=${reason} ===`
+      : `\n=== done messages=${messages.length} reason=${reason} ===`,
   );
-  if (lastText) console.log(lastText);
+
+  if (format === "json") {
+    if (lastText) console.log(headlessLine({ type: "assistant", text: lastText }));
+    console.log(headlessLine({ type: "done", reason }));
+  } else if (lastText) {
+    console.log(lastText);
+  }
+  if (errorMessage) console.error(errorMessage);
+  return exitCodeFor(reason);
 });
 
 if (isMainModule()) {
+  // A successful effect is exit 0 inside runMain. The number returned here is the headless table.
   NodeRuntime.runMain(
     program.pipe(
       Effect.provide(NodeFileSystem.layer),
       Effect.catchAll((error) =>
         Effect.sync(() => {
           console.error(error.message);
-          process.exit(1);
+          return 1;
         }),
       ),
     ),
+    {
+      teardown: (exit, onExit) => {
+        if (Exit.isFailure(exit) && !Cause.isInterruptedOnly(exit.cause)) {
+          onExit(1);
+          return;
+        }
+        const code = Exit.isSuccess(exit) && typeof exit.value === "number" ? exit.value : 0;
+        onExit(code);
+      },
+    },
   );
 }
