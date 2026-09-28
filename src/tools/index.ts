@@ -1,7 +1,13 @@
 export { llmTools } from "./schema.ts";
 export type { ToolCall } from "./schema.ts";
-export { DEFAULT_APPROVAL_PROFILE, isApprovalProfile, readOnlyRefusal } from "./profile.ts";
-export type { ApprovalProfile } from "./profile.ts";
+export {
+  DEFAULT_APPROVAL_PROFILE,
+  isApprovalProfile,
+  isChatMode,
+  planModeRefusal,
+  readOnlyRefusal,
+} from "./profile.ts";
+export type { ApprovalProfile, ChatMode } from "./profile.ts";
 export { decodeToolCall, runLLMTool, runLLMToolsInOrder, runTool } from "./run.ts";
 export {
   DEFAULT_TIMEOUT_MS,

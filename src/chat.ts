@@ -22,10 +22,12 @@ import {
   DEFAULT_TIMEOUT_MS,
   emptyStreak,
   isApprovalProfile,
+  isChatMode,
   llmTools,
   runLLMToolsInOrder,
   DOOM_LOOP_THRESHOLD,
   type ApprovalProfile,
+  type ChatMode,
   type Result,
 } from "./tools/index.ts";
 
@@ -238,8 +240,12 @@ const configureProxy = Effect.sync(() => {
   log(`fetch via proxy ${proxy}`);
 });
 
-export const systemPrompt = (cwd: string): string =>
-  [
+/** Included in the system text only when `--mode plan` is selected. */
+export const PLAN_MODE_INSTRUCTION =
+  "Plan mode: name which files to change and how to check. Do not modify files.";
+
+export const systemPrompt = (cwd: string, mode?: ChatMode): string => {
+  const fixed = [
     "You are a coding agent working in a local workspace.",
     `Workspace directory: ${cwd}`,
     "Tools: read_file, edit, write_file, grep, glob, and bash.",
@@ -249,12 +255,14 @@ export const systemPrompt = (cwd: string): string =>
     "write_file replaces a whole file or creates a new one, including parent directories. Prefer edit for files that already exist.",
     "Use grep and glob to search. Do not use bash for find or grep.",
   ].join(" ");
+  return mode === "plan" ? `${fixed} ${PLAN_MODE_INSTRUCTION}` : fixed;
+};
 
 /** Fixed tool instructions, then nearest-first project instructions when any exist. */
-export const systemMessage = (cwd: string) =>
+export const systemMessage = (cwd: string, mode?: ChatMode) =>
   Effect.gen(function* () {
     const project = yield* projectInstructions(cwd);
-    const fixed = systemPrompt(cwd);
+    const fixed = systemPrompt(cwd, mode);
     if (project === "") return fixed;
     return `${fixed}\n\nProject instructions read from the workspace. Follow them. They are ordinary project files, not hidden policy.\n\n${project}`;
   });
@@ -319,6 +327,7 @@ const program = Effect.gen(function* () {
           cwd: { type: "string" },
           profile: { type: "string" },
           format: { type: "string" },
+          mode: { type: "string" },
         },
         allowPositionals: true,
         strict: true,
@@ -339,7 +348,13 @@ const program = Effect.gen(function* () {
     return yield* failEarly(format, `unknown profile: ${profileArg}`);
   }
   const profile: ApprovalProfile = profileArg ?? DEFAULT_APPROVAL_PROFILE;
-  log(`profile=${profile}`);
+
+  const modeArg = values.mode;
+  if (modeArg !== undefined && !isChatMode(modeArg)) {
+    return yield* failEarly(format, `unknown mode: ${modeArg}`);
+  }
+  const mode: ChatMode | undefined = modeArg;
+  log(`profile=${profile}${mode === "plan" ? " mode=plan" : ""}`);
 
   const loaded = yield* loadConfig.pipe(Effect.either);
   if (Either.isLeft(loaded)) return yield* failEarly(format, loaded.left.message);
@@ -364,7 +379,7 @@ const program = Effect.gen(function* () {
   if (Either.isLeft(resolved)) return yield* failEarly(format, resolved.left.message);
   const cwd = resolved.right;
 
-  const instructions = yield* systemMessage(cwd).pipe(
+  const instructions = yield* systemMessage(cwd, mode).pipe(
     Effect.mapError((error) => new LLMError({ message: error.message })),
     Effect.either,
   );
@@ -428,6 +443,7 @@ const program = Effect.gen(function* () {
       streak,
       DEFAULT_TIMEOUT_MS,
       profile,
+      mode,
     );
     streak = batch.streak;
 

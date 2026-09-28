@@ -28,7 +28,7 @@ The user can also run `/bytengu`.
 Run from this directory. Bun is the only runtime. Do not add npm scripts that call `tsx` or `node`.
 
 - `bun run login` — Grok device-code login. Writes `~/.bytengu/auth.json` mode `0600`.
-- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--out <file>`. Optional `--profile read-only|workspace-write|full`. Optional `--format human|json`. The default profile is `workspace-write`. The default format is `human`: stdout is the final assistant text, and progress stays on stderr.
+- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--out <file>`. Optional `--profile read-only|workspace-write|full`. Optional `--format human|json`. Optional `--mode plan`. The default profile is `workspace-write`. The default format is `human`: stdout is the final assistant text, and progress stays on stderr. Omitting `--mode` keeps that editing run: `edit`, `write_file`, and `bash` still run.
 - `bun test` — unit tests under `test/`. They must not call xAI.
 - `bun run typecheck`
 
@@ -73,13 +73,13 @@ The system message starts with the fixed tool instructions. It then appends `AGE
 The one-shot process uses one exit table. The same case returns the same code on every launch.
 
 - `0` — clean stop. The assistant message has no tool calls. A tool result `{ ok: false }` does not change this: if the assistant then stops with no tool calls, the process still exits `0`.
-- `1` — startup or model error. An unknown profile, an unknown format, an empty prompt, missing auth, a missing workspace, a workspace that is not a directory, or a failed model request.
+- `1` — startup or model error. An unknown profile, an unknown mode, an unknown format, an empty prompt, missing auth, a missing workspace, a workspace that is not a directory, or a failed model request.
 - `2` — the loop reached the 30-step cap.
 - `3` — the same tool name and arguments was repeated 3 times. That call is not executed.
 
 `--format human` is the default. Stdout is the final assistant text only. `--format json` writes only JSON objects, one per line, in order: a `step` event for every model step that started (`{"type":"step","step":1}`), a `tool` event for each recorded tool call (`{"type":"tool","name":"read_file","ok":true}`), an `assistant` event with the final assistant text when there is any, and a closing `done` event (`{"type":"done","reason":"clean"}`). `done.reason` is `clean`, `error`, `step-cap`, or `repeated-tool`, the same reason that selected the exit code, including when the exit is `1` and no step started. JSON events omit tool arguments, tool output, file bodies, access tokens, refresh tokens, and API keys.
 
-`--out` is written for a clean stop, the 30-step cap, the repeated-tool stop, and a model-request failure after a completed assistant turn. It is not written for a pre-loop failure (unknown profile, unknown format, empty prompt, missing auth, missing workspace, or a workspace that is not a directory).
+`--out` is written for a clean stop, the 30-step cap, the repeated-tool stop, and a model-request failure after a completed assistant turn. It is not written for a pre-loop failure (unknown profile, unknown mode, unknown format, empty prompt, missing auth, missing workspace, or a workspace that is not a directory).
 
 Each recorded tool call appends one line to `~/.bytengu/audit.log`. The file mode is `0600`. A later run appends and does not rewrite earlier lines. A run with no tool calls appends no line. The refused third repeat is a failure line. Each line has a timestamp, the approval profile, the workspace directory, the tool name, whether the result was ok or a failure (`ok`), and the process stop reason (`reason`). Lines omit tool arguments, tool output, file bodies, and tokens. Human stdout and JSON stdout use the same audit file.
 
@@ -96,6 +96,8 @@ Paths stay inside the workspace after `realpath`. A symlink that leaves the work
 `grep` and `glob` prefer `rg`. Tests set `BYTENGU_NO_RG=1` to force the walk. Do not shell out to `find` or `grep` from the model prompt as the search path.
 
 `--profile` selects an approval profile: `read-only`, `workspace-write`, or `full`. The default profile is `workspace-write`. `full` applies only when that name is passed. `read-only` still runs `read_file`, `grep`, and `glob`. `bash`, `edit`, and `write_file` return a tool failure and leave the workspace unchanged. `workspace-write` keeps `edit` and `write_file` inside the realpath jail and runs `bash` through `sandbox-exec`. `full` runs `bash` as unsandboxed `/bin/bash -lc`.
+
+`--mode plan` is the one-shot plan mode. That run reads the project and the system text tells the model to name which files to change and how to check, and not to modify files. `read_file`, `grep`, and `glob` still run. `edit`, `write_file`, and `bash` return a tool failure before any write or child process, including when `--profile` is `workspace-write`, `full`, or `read-only`. The plan is the assistant text on stdout. Omitting `--mode` keeps today's editing run.
 
 ## Auth
 
