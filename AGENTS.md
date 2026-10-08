@@ -28,7 +28,7 @@ The user can also run `/bytengu`.
 Run from this directory. Bun is the only runtime. Do not add npm scripts that call `tsx` or `node`.
 
 - `bun run login` — Grok device-code login. Writes `~/.bytengu/auth.json` mode `0600`.
-- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--out <file>`. Optional `--profile read-only|workspace-write|full`. Optional `--format human|json`. Optional `--mode plan`. The default profile is `workspace-write`. The default format is `human`: stdout is the final assistant text, and progress stays on stderr. Omitting `--mode` keeps that editing run: `edit`, `write_file`, and `bash` still run.
+- `bun run chat --cwd <dir> "prompt"` — one shot. Optional `--out <file>`. Optional `--profile read-only|workspace-write|full`. Optional `--format human|json`. Optional `--mode plan`. Optional `--continue`. The default profile is `workspace-write`. The default format is `human`: stdout is the final assistant text, and progress stays on stderr. Omitting `--mode` keeps that editing run: `edit`, `write_file`, and `bash` still run. Omitting `--continue` starts a new conversation.
 - `bun test` — unit tests under `test/`. They must not call xAI.
 - `bun run typecheck`
 
@@ -43,9 +43,10 @@ src/instructions.ts    AGENTS.md / CLAUDE.md for the system message
 src/login.ts           device-code login
 src/proxy.ts           HTTPS_PROXY for Bun fetch
 src/auth/store.ts      ~/.bytengu/auth.json
+src/session.ts         latest workspace session in ~/.bytengu/bytengu.db
 src/provider/          xAI today; add the next provider beside it
 src/tools/             one file per tool, public entry is index.ts
-test/chat/             loop helpers; sessions land here later
+test/chat/             loop helpers
 test/proxy/
 test/tools/            one file per tool, shared setup in harness.ts
 test/provider/         one file per provider
@@ -99,6 +100,8 @@ Paths stay inside the workspace after `realpath`. A symlink that leaves the work
 
 `--mode plan` is the one-shot plan mode. That run reads the project and the system text tells the model to name which files to change and how to check, and not to modify files. `read_file`, `grep`, and `glob` still run. `edit`, `write_file`, and `bash` return a tool failure before any write or child process, including when `--profile` is `workspace-write`, `full`, or `read-only`. The plan is the assistant text on stdout. Omitting `--mode` keeps today's editing run.
 
+`--continue` continues the latest session for that workspace. The session stores the user prompt, the provider's assistant messages (including tool-call fields), and tool results in `~/.bytengu/bytengu.db`. That file is outside the workspace, so a later process still loads the conversation when `--out` is a different path. The new prompt is posted after the stored messages. When that workspace has no stored session, `--continue` starts a new conversation and a clean stop still exits `0`. Omitting `--continue` starts a new conversation, and that conversation becomes the latest session for the workspace. `--continue` on another workspace does not load this one. The in-process read-before-edit set is not restored.
+
 ## Auth
 
 Bearer resolution, in order: oauth record in the auth file, then a stored api record, then `XAI_API_KEY`. A saved oauth login wins over `XAI_API_KEY`. Refresh when the stored expiry or the JWT `exp` is inside two minutes. One refresh at a time. Never print access or refresh tokens.
@@ -109,4 +112,4 @@ The device-code client id is the public Grok CLI client. `referrer` is `bytengu`
 
 ## Do not build yet
 
-Interactive multi-turn sessions, `--resume`, interactive yes/no permission prompts, streaming, compaction, the Responses API, Anthropic's message format, and a TUI. Approval profiles on the one-shot command are the `--profile` flag above. When a provider is added, give it a `baseUrl`, a default model, and a `bearer()` next to xAI. A different wire protocol gets its own `complete()` behind that provider. It does not fork `src/chat.ts`.
+A process that stays open for another typed line, `--resume`, interactive yes/no permission prompts, streaming, compaction, the Responses API, Anthropic's message format, and a TUI. One-shot `--continue` is the session above. Approval profiles on the one-shot command are the `--profile` flag above. When a provider is added, give it a `baseUrl`, a default model, and a `bearer()` next to xAI. A different wire protocol gets its own `complete()` behind that provider. It does not fork `src/chat.ts`.

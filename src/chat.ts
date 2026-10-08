@@ -17,6 +17,7 @@ import {
 import { projectInstructions } from "./instructions.ts";
 import { proxiedFetch, proxyUrl } from "./proxy.ts";
 import { sessionConfig } from "./provider/xai.ts";
+import { loadSession, saveSession } from "./session.ts";
 import {
   DEFAULT_APPROVAL_PROFILE,
   DEFAULT_TIMEOUT_MS,
@@ -328,6 +329,7 @@ const program = Effect.gen(function* () {
           profile: { type: "string" },
           format: { type: "string" },
           mode: { type: "string" },
+          continue: { type: "boolean", default: false },
         },
         allowPositionals: true,
         strict: true,
@@ -385,12 +387,27 @@ const program = Effect.gen(function* () {
   );
   if (Either.isLeft(instructions)) return yield* failEarly(format, instructions.left.message);
 
-  const messages: TranscriptMessage[] = [
-    { role: "system", content: instructions.right },
-    { role: "user", content: prompt },
-  ];
+  const continued = values.continue === true;
+  const stored = continued
+    ? yield* loadSession(cwd).pipe(
+        Effect.mapError((error) => new LLMError({ message: error.message })),
+        Effect.either,
+      )
+    : undefined;
+  if (stored && Either.isLeft(stored)) return yield* failEarly(format, stored.left.message);
+  const prior = stored && Either.isRight(stored) ? stored.right : undefined;
 
-  log(`model=${config.model} cwd=${cwd} profile=${profile} steps<=${LOOP_THRESHOLD}`);
+  const messages: TranscriptMessage[] =
+    prior && prior.length > 0
+      ? ([...prior, { role: "user", content: prompt }] as TranscriptMessage[])
+      : [
+          { role: "system", content: instructions.right },
+          { role: "user", content: prompt },
+        ];
+
+  log(
+    `model=${config.model} cwd=${cwd} profile=${profile} session=${prior && prior.length > 0 ? "continue" : "new"} steps<=${LOOP_THRESHOLD}`,
+  );
   log(`user: ${preview(prompt, 200)}`);
 
   const session = { reads: new Set<string>() };
@@ -472,6 +489,14 @@ const program = Effect.gen(function* () {
     reason === "clean" || reason === "step-cap" || reason === "repeated-tool" || sawAssistant;
   if (writeTranscript) {
     yield* fs.writeFileString(outPath, `${JSON.stringify(messages, null, 2)}\n`);
+    const saved = yield* saveSession(cwd, messages).pipe(
+      Effect.mapError((error) => new LLMError({ message: error.message })),
+      Effect.either,
+    );
+    if (Either.isLeft(saved)) {
+      reason = "error";
+      errorMessage = saved.left.message;
+    }
   }
   if (recorded.length > 0) yield* appendAudit(recorded, reason, profile, cwd);
 

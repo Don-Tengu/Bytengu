@@ -558,8 +558,9 @@ test("audit log appends one line per tool call and skips a run with no tools", a
     assert.equal(readFileSync(audit, "utf8"), afterSecond);
 
     const names = readdirSync(join(home, ".bytengu")).sort();
-    assert.deepEqual(names, ["audit.log", "auth.json"]);
+    assert.deepEqual(names, ["audit.log", "auth.json", "bytengu.db"]);
     assert.equal(statSync(audit).mode & 0o777, 0o600);
+    assert.equal(statSync(join(home, ".bytengu", "bytengu.db")).mode & 0o777, 0o600);
     assert.equal(readFileSync(authPath, "utf8"), authBefore);
     assert.equal(authBefore.includes(FAKE_KEY), true);
     assert.equal(afterSecond.includes(FAKE_KEY), false);
